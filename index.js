@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, delay } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const express = require('express');
 const https = require('https');
 const fs = require('fs');
@@ -6,41 +6,85 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Securely load environment settings from Render dashboard panels
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || '';
 
-// IMPORTANT: Put your real phone number here with country code (e.g., "91" for India), no spaces, no + signs
-// Example: "919876543210"
-const PAIRING_PHONE_NUMBER = "919892758104"; 
+// Put your real phone number here with country code (e.g., 919892758104)
+const MY_PHONE = "919892758104"; 
 
 let SYSTEM_PROMPT = 'You are a helpful assistant.';
 try {
     if (fs.existsSync('prompt.txt')) {
         SYSTEM_PROMPT = fs.readFileSync('prompt.txt', 'utf8').trim();
-        console.log("📝 Successfully read system rules from prompt.txt");
     }
 } catch (e) {
-    console.log("⚠️ Reading prompt.txt failed, using basic profile rules.");
+    console.log("Using default fallback prompt rules.");
 }
 
-// Simple health dashboard page so Render knows the service is up and active
+let globalSock = null;
+let generatedCode = '';
+let connectionErrorLog = 'System initialized. Waiting for web hook event...';
+
+// 1. DYNAMIC DASHBOARD (Shows code on screen without reliance on logs)
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html>
-        <head><title>RentLog Live Monitor</title></head>
-        <body style="font-family:sans-serif; text-align:center; padding:50px; background:#f4f7f6;">
-            <h2>RentLog AI Support Router Engine</h2>
-            <p>🟢 Cloud server is active. Check your Render Terminal Logs tab to view your authentication pairing steps!</p>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>RentLog Engine Room</title>
+            <style>
+                body { font-family: -apple-system, sans-serif; text-align: center; background: #f4f7f6; margin: 0; padding: 20px; }
+                .card { background: white; max-width: 450px; margin: 40px auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+                .btn { background: #25D366; color: white; border: none; padding: 12px 24px; font-size: 16px; font-weight: bold; border-radius: 6px; cursor: pointer; text-decoration: none; display: inline-block; }
+                .btn:hover { background: #1ebd58; }
+                .code-box { font-size: 32px; font-family: monospace; background: #eef9f3; color: #075E54; padding: 15px; border-radius: 8px; letter-spacing: 4px; font-weight: bold; margin: 20px 0; border: 2px dashed #25D366; }
+                .status { font-size: 13px; color: #666; background: #eee; padding: 10px; border-radius: 6px; text-align: left; overflow-x: auto; white-space: pre-wrap; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>RentLog WhatsApp Bot Portal</h2>
+                <p>Target Phone: <strong>+${MY_PHONE}</strong></p>
+                
+                ${generatedCode ? `
+                    <p style="color: green; font-weight: bold;">🎯 CODE GENERATED SUCCESSFULLY!</p>
+                    <div class="code-box">${generatedCode}</div>
+                    <p style="font-size: 14px; text-align: left; color: #444;"><strong>How to link:</strong><br>1. Open WhatsApp on phone.<br>2. Tap Settings > Linked Devices > Link a Device.<br>3. Select "Link with phone number instead".<br>4. Type the code above.</p>
+                ` : `
+                    <p style="color: #555;">Click below to send a fresh request to WhatsApp servers:</p>
+                    <a href="/request-code" class="btn">🔑 Fetch Link Code</a>
+                `}
+                
+                <hr style="border: 0; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="text-align: left; font-size: 12px; font-weight: bold; margin-bottom: 5px; color: #333;">Live Diagnostics Log:</p>
+                <div class="status">${connectionErrorLog}</div>
+            </div>
         </body>
         </html>
     `);
 });
 
-// Process pipeline matching logic directly out to Gemini core servers
+// TRIGGER ROUTE FOR GETTING LINK CODE
+app.get('/request-code', async (req, res) => {
+    if (!globalSock) {
+        connectionErrorLog = "Socket interface offline. Try again in 5 seconds.";
+        return res.redirect('/');
+    }
+    try {
+        connectionErrorLog = "Contacting WhatsApp infrastructure arrays...";
+        const code = await globalSock.requestPairingCode(MY_PHONE);
+        generatedCode = code;
+        connectionErrorLog = `Code successfully rendered: ${code}`;
+    } catch (err) {
+        connectionErrorLog = `Failed to generate code: ${err.message}. Try clicking again.`;
+    }
+    res.redirect('/');
+});
+
+// 2. BACKEND CONNECTIONS
 function askGemini(userMessage, callback) {
-    if (!GEMINI_API_KEY) return callback("Error: Missing API key.");
+    if (!GEMINI_API_KEY) return callback("Error: Key configuration missing.");
     const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     const requestPayload = JSON.stringify({ contents: [{ parts: [{ text: `${SYSTEM_PROMPT}\n\nUser Question: "${userMessage}"\nAnswer:` }] }] });
 
@@ -53,7 +97,7 @@ function askGemini(userMessage, callback) {
                 if (parsed.candidates && parsed.candidates[0].content.parts[0].text) {
                     callback(parsed.candidates[0].content.parts[0].text);
                 }
-            } catch (e) { callback("Temporary server latency."); }
+            } catch (e) { callback("Pipeline busy."); }
         });
     });
     req.write(requestPayload); req.end();
@@ -62,56 +106,37 @@ function askGemini(userMessage, callback) {
 function keepServerAwake() {
     if (!RENDER_EXTERNAL_URL) return;
     setInterval(() => {
-        https.get(RENDER_EXTERNAL_URL, (res) => {
-            console.log(`🔄 Ping sync status: ${res.statusCode}`);
-        }).on('error', (err) => console.error("Ping error:", err.message));
+        https.get(RENDER_EXTERNAL_URL, (res) => {}).on('error', (err) => {});
     }, 600000);
 }
 
-// Core connection initialization framework
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     
-    const sock = makeWASocket({
+    globalSock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, 
+        printQRInTerminal: false,
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    globalSock.ev.on('creds.update', saveCreds);
 
-    // If not authenticated yet, wait for initialization and request a solid code explicitly
-    if (!sock.authState.creds.registered) {
-        if (PAIRING_PHONE_NUMBER === "91XXXXXXXXXX") {
-            console.log("\n⚠️ ERROR: You forgot to replace '91XXXXXXXXXX' with your real phone number in index.js!");
-            return;
-        }
-        
-        console.log(`\n⏳ Holding link channel open for phone target: ${PAIRING_PHONE_NUMBER}...`);
-        await delay(6000); // Gives the network layer a 6-second delay gap to bypass the drop loops safely
-        
-        try {
-            const code = await sock.requestPairingCode(PAIRING_PHONE_NUMBER);
-            console.log("\n==================================================");
-            console.log(`🔑 YOUR WHATSAPP PAIRING CODE IS: ${code}`);
-            console.log("==================================================\n");
-            console.log("📲 HOW TO USE IT:\n1. Open WhatsApp on your mobile phone.\n2. Go to Settings > Linked Devices > Link a Device.\n3. Choose 'Link with phone number instead'.\n4. Type this code into your phone screen!\n");
-        } catch (err) {
-            console.error("❌ Link generation failed. Retrying cycle...", err.message);
-        }
-    }
-
-    sock.ev.on('connection.update', (update) => {
+    globalSock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
+        
         if (connection === 'close') {
+            generatedCode = '';
+            connectionErrorLog = `Closed: ${lastDisconnect?.error?.message || 'Re-establishing socket...'}`;
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
         } else if (connection === 'open') {
-            console.log('🚀 SUCCESS! Cloud system is linked to your account active and listening!');
+            generatedCode = '';
+            connectionErrorLog = '🚀 Live! Authenticated and linked successfully.';
+            console.log('Bot fully running.');
         }
     });
 
-    sock.ev.on('messages.upsert', async (msgUpdate) => {
+    globalSock.ev.on('messages.upsert', async (msgUpdate) => {
         const chatMessage = msgUpdate.messages[0];
         if (!chatMessage.message || chatMessage.key.fromMe) return;
         const remoteJid = chatMessage.key.remoteJid;
@@ -119,14 +144,12 @@ async function startBot() {
         if (!incomingText) return;
 
         askGemini(incomingText, async (aiReply) => {
-            await sock.sendMessage(remoteJid, { text: aiReply });
-            console.log(`📤 Message sent back to client channel successfully.`);
+            await globalSock.sendMessage(remoteJid, { text: aiReply });
         });
     });
 }
 
 app.listen(PORT, () => {
-    console.log(`🌐 System layer processing on port ${PORT}`);
     startBot().catch(err => console.error(err));
     keepServerAwake();
 });
