@@ -1,79 +1,46 @@
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, delay } = require('@whiskeysockets/baileys');
 const express = require('express');
-const QRCode = require('qrcode');
 const https = require('https');
 const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-let latestQRCodeImage = '';
 
+// Securely load environment settings from Render dashboard panels
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || '';
+
+// IMPORTANT: Put your real phone number here with country code (e.g., "91" for India), no spaces, no + signs
+// Example: "919876543210"
+const PAIRING_PHONE_NUMBER = "919892758104"; 
 
 let SYSTEM_PROMPT = 'You are a helpful assistant.';
 try {
     if (fs.existsSync('prompt.txt')) {
         SYSTEM_PROMPT = fs.readFileSync('prompt.txt', 'utf8').trim();
+        console.log("📝 Successfully read system rules from prompt.txt");
     }
 } catch (e) {
-    console.log("Using default fallback prompt rules.");
+    console.log("⚠️ Reading prompt.txt failed, using basic profile rules.");
 }
 
-// 1. DASHBOARD OVERVIEW
+// Simple health dashboard page so Render knows the service is up and active
 app.get('/', (req, res) => {
-    if (latestQRCodeImage) {
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>RentLog Link Portal</title>
-                <style>
-                    body { font-family: -apple-system, sans-serif; text-align: center; background: #f4f7f6; margin: 0; padding: 20px; }
-                    .card { background: white; max-width: 400px; margin: 40px auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
-                    img { border: 3px solid #25D366; padding: 10px; border-radius: 12px; background: white; max-width: 100%; height: auto; }
-                    h2 { color: #075E54; margin-top: 0; }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <h2>RentLog Bot Connection</h2>
-                    <p>Scan this live code using your WhatsApp Link Device option:</p>
-                    <div style="margin: 25px 0;"><img src="${latestQRCodeImage}" /></div>
-                    <p style="color: #888; font-size: 11px;">Refreshes every 5 seconds automatically.</p>
-                </div>
-                <script>setTimeout(() => { location.reload(); }, 5000);</script>
-            </body>
-            </html>
-        `);
-    } else {
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>RentLog Routing...</title>
-                <style>
-                    body { font-family: -apple-system, sans-serif; text-align: center; background: #f4f7f6; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-                    .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <h2>🔄 Fetching Live WhatsApp QR Stream...</h2>
-                    <p style="color:#666;">Connecting to WhatsApp server. If this page stays blank, check your Render dashboard terminal log tabs for the text pairing code backup!</p>
-                </div>
-                <script>setTimeout(() => { location.reload(); }, 5000);</script>
-            </body>
-            </html>
-        `);
-    }
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>RentLog Live Monitor</title></head>
+        <body style="font-family:sans-serif; text-align:center; padding:50px; background:#f4f7f6;">
+            <h2>RentLog AI Support Router Engine</h2>
+            <p>🟢 Cloud server is active. Check your Render Terminal Logs tab to view your authentication pairing steps!</p>
+        </body>
+        </html>
+    `);
 });
 
-// 2. GEMINI PIPELINE
+// Process pipeline matching logic directly out to Gemini core servers
 function askGemini(userMessage, callback) {
-    if (!GEMINI_API_KEY) return callback("Configuration key missing.");
+    if (!GEMINI_API_KEY) return callback("Error: Missing API key.");
     const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     const requestPayload = JSON.stringify({ contents: [{ parts: [{ text: `${SYSTEM_PROMPT}\n\nUser Question: "${userMessage}"\nAnswer:` }] }] });
 
@@ -86,7 +53,7 @@ function askGemini(userMessage, callback) {
                 if (parsed.candidates && parsed.candidates[0].content.parts[0].text) {
                     callback(parsed.candidates[0].content.parts[0].text);
                 }
-            } catch (e) { callback("Service offline."); }
+            } catch (e) { callback("Temporary server latency."); }
         });
     });
     req.write(requestPayload); req.end();
@@ -96,38 +63,51 @@ function keepServerAwake() {
     if (!RENDER_EXTERNAL_URL) return;
     setInterval(() => {
         https.get(RENDER_EXTERNAL_URL, (res) => {
-            console.log(`🔄 Keep-Alive Ping Status: ${res.statusCode}`);
-        }).on('error', (err) => console.error(err.message));
+            console.log(`🔄 Ping sync status: ${res.statusCode}`);
+        }).on('error', (err) => console.error("Ping error:", err.message));
     }, 600000);
 }
 
-// 3. WHATSAPP CONNECTION CONTROLLER
+// Core connection initialization framework
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true, // Forces the terminal window on Render to display the text QR backup pattern
+        printQRInTerminal: false, 
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            console.log("🎯 CRYPTO STREAM GENERATED: Syncing with web dashboard canvas...");
-            latestQRCodeImage = await QRCode.toDataURL(qr);
+    // If not authenticated yet, wait for initialization and request a solid code explicitly
+    if (!sock.authState.creds.registered) {
+        if (PAIRING_PHONE_NUMBER === "91XXXXXXXXXX") {
+            console.log("\n⚠️ ERROR: You forgot to replace '91XXXXXXXXXX' with your real phone number in index.js!");
+            return;
         }
         
+        console.log(`\n⏳ Holding link channel open for phone target: ${PAIRING_PHONE_NUMBER}...`);
+        await delay(6000); // Gives the network layer a 6-second delay gap to bypass the drop loops safely
+        
+        try {
+            const code = await sock.requestPairingCode(PAIRING_PHONE_NUMBER);
+            console.log("\n==================================================");
+            console.log(`🔑 YOUR WHATSAPP PAIRING CODE IS: ${code}`);
+            console.log("==================================================\n");
+            console.log("📲 HOW TO USE IT:\n1. Open WhatsApp on your mobile phone.\n2. Go to Settings > Linked Devices > Link a Device.\n3. Choose 'Link with phone number instead'.\n4. Type this code into your phone screen!\n");
+        } catch (err) {
+            console.error("❌ Link generation failed. Retrying cycle...", err.message);
+        }
+    }
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
         if (connection === 'close') {
-            latestQRCodeImage = '';
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
         } else if (connection === 'open') {
-            latestQRCodeImage = '';
-            console.log('🚀 BOOT SUCCESSFUL! Connected to WhatsApp cloud array.');
+            console.log('🚀 SUCCESS! Cloud system is linked to your account active and listening!');
         }
     });
 
@@ -140,12 +120,13 @@ async function startBot() {
 
         askGemini(incomingText, async (aiReply) => {
             await sock.sendMessage(remoteJid, { text: aiReply });
+            console.log(`📤 Message sent back to client channel successfully.`);
         });
     });
 }
 
 app.listen(PORT, () => {
-    console.log(`🌐 Server running on port ${PORT}`);
+    console.log(`🌐 System layer processing on port ${PORT}`);
     startBot().catch(err => console.error(err));
     keepServerAwake();
 });
