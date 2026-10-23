@@ -63,14 +63,16 @@ async function startWhatsAppBot() {
     // 5. Sample Message Handler
     sock.ev.on('messages.upsert', async (chatUpdate) => {
         try {
-            const msg = chatUpdate.messages[0];
-            if (!msg.message || msg.key.fromMe) return;
+            if (chatUpdate.type !== 'notify') return;
+            for (const msg of chatUpdate.messages) {
+            if (!msg.message || msg.key.fromMe) continue;
 
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
             const from = msg.key.remoteJid;
 
-            if (text && text.toLowerCase() === 'ping') {
+            if (text && text.trim().toLowerCase() === 'ping') {
                 await sock.sendMessage(from, { text: 'pong 🏓' });
+            }
             }
         } catch (error) {
             console.error('Error handling incoming message:', error);
