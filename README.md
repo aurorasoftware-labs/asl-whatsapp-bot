@@ -15,6 +15,11 @@ This repository upgrades the former RentLog-only ping bot into a multi-product *
 
 This bot does not access customer databases or create tickets. Photos, screenshots, documents and voice notes are not interpreted.
 
+
+## Free Android phone hosting (Termux)
+
+You can host this bot on an Android phone without Oracle or Render. Follow **[the phone setup guide](deploy/termux/README.md)**. It includes a restart-on-failure runner, Termux:Boot setup, Samsung battery guidance and persistent linked-device credentials. Phone hosting is not guaranteed 24/7; Android may stop background services.
+
 ## Step 1 — Local setup on Windows (PowerShell)
 
 Install Node.js 20+ and Git. Then run:
