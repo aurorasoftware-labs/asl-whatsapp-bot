@@ -23,3 +23,5 @@ jobs:
         run: npm run check
       - name: Run unit tests
         run: npm test
+      - name: Validate Oracle installer shell syntax
+        run: bash -n deploy/oracle/setup.sh

@@ -130,3 +130,7 @@ Official sources used: https://aurorasoftwarelabs.pages.dev/products , https://r
 **AI returns an error or rate limit:** Deterministic bot replies still work. Check API key, provider model and quota; disable AI while investigating.
 
 **Public operation and compliance:** Follow WhatsApp's business messaging rules. For an approved business integration, migrate to the official Cloud API with its webhook, account and message-template requirements rather than relying indefinitely on a linked-device automation library.
+
+## Free Oracle Cloud Always Free deployment
+
+For an Oracle Cloud Ubuntu ARM64 VM, follow the complete **[Oracle Always Free setup guide](deploy/oracle/README.md)**. After you create an Always Free VM and log in, the provided `deploy/oracle/setup.sh` installer configures Node.js, a dedicated systemd service, private credentials, reboot recovery, and persistent WhatsApp authentication. **The bot is not deployed or paired until these steps are completed.**
