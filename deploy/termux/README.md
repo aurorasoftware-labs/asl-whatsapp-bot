@@ -73,7 +73,7 @@ Install Termux:Boot and open it once as described in Step 1. Then, in Termux:
     mkdir -p ~/.termux/boot
     cat > ~/.termux/boot/start-aurora-bot <<'EOF'
     #!/data/data/com.termux/files/usr/bin/bash
-    "$HOME/rentlog-whatsapp-bot/deploy/termux/start.sh"
+    bash "$HOME/rentlog-whatsapp-bot/deploy/termux/start.sh"
     EOF
     chmod +x ~/.termux/boot/start-aurora-bot
 
