@@ -1,15 +1,20 @@
 {
-  "name": "rentlog-whatsapp-cloud-server",
-  "version": "1.0.0",
-  "description": "RentLog Automated AI Support Bot Engine",
+  "name": "aurora-software-labs-whatsapp-bot",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Aurora Software Labs WhatsApp support assistant",
   "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test",
+    "check": "node --check index.js && node --check src/replies.js && node --check src/knowledge.js && node --check src/ai.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.5.0",
-    "@hapi/boom": "^10.0.1",
-    "express": "^4.19.2",
-    "qrcode": "^1.5.3"
+    "@whiskeysockets/baileys": "^6.7.0",
+    "pino": "^9.0.0",
+    "qrcode": "^1.5.4"
   }
 }

@@ -1,91 +1,216 @@
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState, 
-    DisconnectReason 
-} = require('@whiskeysockets/baileys');
+'use strict';
+
+const makeWASocket = require('@whiskeysockets/baileys').default;
+const { useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode');
 const pino = require('pino');
-const path = require('path');
+const path = require('node:path');
+const http = require('node:http');
+const { replyTo } = require('./src/replies');
+const { generateAIAnswer } = require('./src/ai');
 
-// 1. Configure Persistent Storage Path
-// If running on Render with a persistent disk attached at /var/data, use it.
-// Otherwise, fall back to a local folder named 'auth_info'
-const AUTH_DIR = process.env.RENDER_DISK_MOUNT_PATH 
-    ? path.join(process.env.RENDER_DISK_MOUNT_PATH, 'auth_info') 
-    : path.join(__dirname, 'auth_info');
+const AUTH_DIR = path.resolve(
+  process.env.AUTH_DIR ||
+  (process.env.RENDER_DISK_MOUNT_PATH
+    ? path.join(process.env.RENDER_DISK_MOUNT_PATH, 'auth_info')
+    : path.join(__dirname, 'auth_info'))
+);
 
-async function startWhatsAppBot() {
-    console.log(`Initializing authentication from: ${AUTH_DIR}`);
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
+const contexts = new Map();
+const processedIds = new Map();
+const CONTEXT_TTL_MS = 45 * 60 * 1000;
+const DEDUPE_TTL_MS = 20 * 60 * 1000;
+const allowedNumbers = new Set(
+  (process.env.ALLOWED_NUMBERS || '').split(',').map((v) => v.replace(/\D/g, '')).filter(Boolean)
+);
 
-    // 2. Initialize Baileys Socket
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: true,
-        // Set logger level to 'silent' or 'error' in production to clean up log streams
-        logger: pino({ level: 'info' }), 
-        browser: ['Ubuntu', 'Chrome', '20.0.04']
-    });
+let socket = null;
+let active = false;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let shuttingDown = false;
 
-    // 3. Handle Connection Status Updates
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            console.log('New QR Code generated. Please scan it in WhatsApp.');
-        }
-
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            
-            console.log(`Connection closed. Reason Status Code: ${statusCode}`);
-
-            if (shouldReconnect) {
-                // Determine backoff delay based on the failure reason
-                // If it's a conflict/multidevice boot during rolling deployment, wait longer (10s)
-                const delay = statusCode === DisconnectReason.connectionReplaced ? 10000 : 5000;
-                
-                console.log(`Attempting reconnection in ${delay / 1000} seconds...`);
-                setTimeout(() => {
-                    startWhatsAppBot();
-                }, delay);
-            } else {
-                console.log('Device logged out. Terminal stopped. Please delete auth folder and re-scan.');
-            }
-        } else if (connection === 'open') {
-            console.log('🎉 RentLog Bot is securely connected to WhatsApp!');
-        }
-    });
-
-    // 4. Save Credentials on Update
-    sock.ev.on('creds.update', saveCreds);
-
-    // 5. Sample Message Handler
-    sock.ev.on('messages.upsert', async (chatUpdate) => {
-        try {
-            const msg = chatUpdate.messages[0];
-            if (!msg.message || msg.key.fromMe) return;
-
-            const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-            const from = msg.key.remoteJid;
-
-            if (text && text.toLowerCase() === 'ping') {
-                await sock.sendMessage(from, { text: 'pong 🏓' });
-            }
-        } catch (error) {
-            console.error('Error handling incoming message:', error);
-        }
-    });
+function getText(message) {
+  const inner = message?.ephemeralMessage?.message ||
+    message?.viewOnceMessage?.message || message;
+  return inner?.conversation || inner?.extendedTextMessage?.text || null;
 }
 
-// Global error tracking to prevent unhandled node script crashes
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception caught:', err);
+function acceptMessage(msg, type) {
+  if (type !== 'notify' || !msg?.message || msg?.key?.fromMe) return false;
+  const jid = msg.key.remoteJid || '';
+  // Never auto-reply in groups, broadcasts, channels, or to status updates.
+  if (!jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@lid')) return false;
+  if (allowedNumbers.size) {
+    // A @lid is not a verified phone-number mapping. Reject it while testing
+    // with a number allowlist instead of guessing the sender's identity.
+    if (!jid.endsWith('@s.whatsapp.net') || !allowedNumbers.has(jid.split('@')[0])) return false;
+  }
+  const id = String(msg.key.id || '');
+  if (!id) return false;
+  const lookup = jid + ':' + id;
+  const now = Date.now();
+  if (processedIds.has(lookup)) return false;
+  processedIds.set(lookup, now);
+  if (processedIds.size > 1500) {
+    for (const [key, timestamp] of processedIds) {
+      if (now - timestamp > DEDUPE_TTL_MS || processedIds.size > 1500) processedIds.delete(key);
+      if (processedIds.size <= 1000) break;
+    }
+  }
+  return true;
+}
+
+async function onMessage(message) {
+  const jid = message.key.remoteJid;
+  const raw = getText(message.message);
+  const prior = contexts.get(jid);
+  const topic = prior && Date.now() - prior.updatedAt < CONTEXT_TTL_MS ? prior.topic : null;
+  let answer;
+
+  if (typeof raw !== 'string') {
+    answer = 'I’m the Aurora Software Labs *text support* bot. I cannot inspect pictures, documents, voice messages or videos yet. Please type your question, or type *menu*.';
+  } else if (raw.trim().length > 1600) {
+    answer = 'Please shorten your message to 1,600 characters or fewer, or contact ' +
+      'https://aurorasoftwarelabs.pages.dev/contact for detailed assistance.';
+  } else {
+    const result = replyTo(raw, topic);
+    contexts.set(jid, { topic: result.topic, updatedAt: Date.now() });
+    answer = result.text;
+    if (result.needsAI) {
+      const fromAI = await generateAIAnswer(raw, result.topic);
+      if (fromAI) answer = fromAI + '\n\n— Aurora Software Labs Assistant 🤖';
+    }
+  }
+  if (contexts.size > 1000) {
+    for (const [id, value] of contexts) {
+      if (Date.now() - value.updatedAt > CONTEXT_TTL_MS) contexts.delete(id);
+    }
+  }
+  await socket.sendMessage(jid, { text: answer });
+}
+
+function healthServer() {
+  const port = Number(process.env.PORT || process.env.HEALTH_PORT);
+  if (!port) return;
+  const server = http.createServer((request, response) => {
+    if (request.url !== '/health' && request.url !== '/ready') {
+      response.writeHead(404).end('Not found');
+      return;
+    }
+    const ready = active;
+    response.writeHead(request.url === '/ready' && !ready ? 503 : 200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ service: 'aurora-whatsapp-bot', alive: true, whatsappConnected: ready }));
+  });
+  server.listen(port, '0.0.0.0', () => console.log('Health endpoint listening on port ' + port));
+}
+
+function scheduleReconnect(statusCode) {
+  if (shuttingDown || reconnectTimer) return;
+  if (statusCode === DisconnectReason.loggedOut) {
+    console.error('WhatsApp linked device was logged out. Remove the local or persistent session only if you intend to pair again.');
+    return;
+  }
+  reconnectAttempts += 1;
+  const backoff = statusCode === DisconnectReason.restartRequired
+    ? 1000
+    : Math.min(60000, 2000 * Math.pow(2, Math.min(reconnectAttempts, 5)));
+  console.warn('WhatsApp disconnected (status ' + (statusCode ?? 'unknown') +
+    '). Reconnecting in ' + Math.ceil(backoff / 1000) + ' seconds.');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect().catch((error) => {
+      console.error('Connection failed:', error?.message || 'unknown error');
+      scheduleReconnect();
+    });
+  }, backoff);
+}
+
+async function connect() {
+  if (shuttingDown) return;
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const currentSocket = makeWASocket({
+    auth: state,
+    logger,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    browser: ['Aurora Software Labs', 'Chrome', '1.0']
+  });
+  socket = currentSocket;
+  let pairingRequested = false;
+
+  currentSocket.ev.on('creds.update', saveCreds);
+
+  currentSocket.ev.on('messages.upsert', async ({ messages, type }) => {
+    for (const msg of messages || []) {
+      if (!acceptMessage(msg, type)) continue;
+      try {
+        await onMessage(msg);
+      } catch (error) {
+        // Never print incoming messages, raw chat payloads or credentials.
+        console.error('Failed to process or send a response (' + (error?.name || 'error') + ').');
+      }
+    }
+  });
+
+  currentSocket.ev.on('connection.update', async ({ connection, qr, lastDisconnect }) => {
+    if (qr && !state.creds.registered) {
+      const phone = (process.env.PAIRING_PHONE_NUMBER || '').replace(/\D/g, '');
+      if (phone && !pairingRequested) {
+        pairingRequested = true;
+        try {
+          const code = await currentSocket.requestPairingCode(phone);
+          console.log('WhatsApp pairing code (enter it in Linked Devices): ' + code);
+        } catch {
+          pairingRequested = false;
+          console.warn('Could not request pairing code; consider using QR pairing instead.');
+        }
+      } else if (!phone) {
+        try {
+          console.log('Scan this QR from WhatsApp > Linked devices > Link a device:');
+          console.log(await qrcode.toString(qr, { type: 'terminal', small: true }));
+        } catch {
+          console.error('Unable to display pairing QR. Configure PAIRING_PHONE_NUMBER for code pairing.');
+        }
+      }
+    }
+
+    if (socket !== currentSocket) return;
+    if (connection === 'open') {
+      active = true;
+      reconnectAttempts = 0;
+      console.log('✅ Aurora Software Labs WhatsApp Bot connected.');
+    } else if (connection === 'close') {
+      active = false;
+      currentSocket.ev.removeAllListeners();
+      const status = lastDisconnect?.error?.output?.statusCode;
+      scheduleReconnect(status);
+    }
+  });
+}
+
+function shutdown(signal) {
+  shuttingDown = true;
+  active = false;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  console.log('Stopping Aurora bot (' + signal + ')');
+  try { socket?.end?.(); } catch { /* closing */ }
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('unhandledRejection', (reason) => {
+  console.error('Unexpected async error:', reason?.message || 'unhandled rejection');
+});
+process.on('uncaughtException', (error) => {
+  console.error('Fatal error:', error?.message || 'uncaught exception');
+  process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+healthServer();
+connect().catch((error) => {
+  console.error('Initial connection error:', error?.message || 'unknown error');
+  scheduleReconnect();
 });
-
-// Run the bot
-startWhatsAppBot();
